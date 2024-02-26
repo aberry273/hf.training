@@ -1,0 +1,17 @@
+pandas
+torch
+numpy
+
+# HF
+transformers
+datasets
+evaluate
+
+# Utilities
+rouge_score
+nltk
+matplotlib
+sentencepiece
+protobuf
+absl-py
+rouge-score

@@ -1,0 +1,29 @@
+datasets
+matplotlib
+pandas
+pytorch
+numpy
+
+# Dependencies
+protobuf
+accelerate
+sentencepiece
+
+# summary
+## inputs, can be one-hot-encoded, or embeddings (computation shortcut)
+## sandwich layers of matmul  (such as convolutions or embeddings, or not) and activation functions
+## activation functions, reLU is the easiest
+## outputs can be tweaked such as softmax
+## then loss functions such as cross entropy loss, or mean square error or mean absolute error
+
+#1. INIT
+#2. PREDICT
+#3. LOSS
+#4. GRADIENT
+#5. STEP (goto 2. repeat)
+#6. STOP
+
+# 1. INITIALIZE - Set random parameters
+# 2. LOSS - Function to return a number that is smaller when performing better
+# 3. STEP - A way to figure out whether the weight should increase or decrease (try it then calculate change)
+# 4. STOP - After repeating 
