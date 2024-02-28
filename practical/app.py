@@ -10,9 +10,11 @@ from matplotlib import pyplot as plt
 # huggingface
 
 ## transformers
-from transformers import pipeline
-from transformers import BertConfig, BertModel, AutoTokenizer, DataCollatorWithPadding, AdamW, AutoTokenizer, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM
+from transformers import pipeline, BertConfig, BertModel, AutoTokenizer, DataCollatorWithPadding, AutoTokenizer, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq, Seq2SeqTrainer, get_scheduler
 
+from accelerate import Accelerator
+from huggingface_hub import Repository, get_full_repo_name, create_repo, repo_info
+#git_pull, 
 ## utilities
 from lib2to3.pgen2.tokenize import tokenize
 from sre_parse import Tokenizer
@@ -21,15 +23,20 @@ from tqdm.auto import tqdm
 
 ## datasets
 from datasets import load_dataset, DatasetDict, Dataset
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
 
 ## metrics
 import evaluate
 import nltk
 from nltk.tokenize import sent_tokenize
+from typing import Optional
 
 classification_ds = "cnmoro/Instruct-PTBR-ENUS-11M"
 _col_summarised_text = "INSTRUCTION"
 _col_full_text = "RESPONSE"
+
+## FN - DATASET
 
 def is_en(x): return ( x["LANGUAGE"] == "en" )
 
@@ -64,30 +71,37 @@ def show_histogram(df, colname):
     hist = df.hist(column=colname,legend=True)
     plt.show()
 
-# Load datasets
-dataset = load_dataset(classification_ds, split="train")
-# Filter english only
-# Ignore, include portugese so the model doesn't overfit to english
-filtered_dict = dataset.filter(is_en)
-filtered_dict = filtered_dict.shuffle(seed=42).select(range(50000))
+def init_dataset():
+    # Load datasets
+    dataset = load_dataset(classification_ds, split="train")
+    # Filter english only
+    # Ignore, include portugese so the model doesn't overfit to english
+    filtered_dict = dataset.filter(is_en)
+    filtered_dict = filtered_dict.shuffle(seed=42).select(range(50000))
 
-get_word_count(filtered_dict, _col_summarised_text)
-print(dataset)
-# show_histogram(df_count, "INSTRUCTION_COUNT")
+    get_word_count(filtered_dict, _col_summarised_text)
+    print(dataset)
+    # show_histogram(df_count, "INSTRUCTION_COUNT")
 
-train_test_valid_ds = split_train_test_valid(filtered_dict)
+    train_test_valid_ds = split_train_test_valid(filtered_dict)
 
-print(filtered_dict)
-#show_samples(train_test_valid_ds, filtered_dict.features)
+    print(filtered_dict)
+    #show_samples(train_test_valid_ds, filtered_dict.features)
 
-model_checkpoint = "google/mt5-small"
-tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+    model_checkpoint = "google/mt5-small"
+    tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
 
-inputs = tokenizer("I loved reading the Hunger Games!")
-tokenizer.convert_ids_to_tokens(inputs.input_ids)
+    inputs = tokenizer("I loved reading the Hunger Games!")
+    tokenizer.convert_ids_to_tokens(inputs.input_ids)
 
+    return train_test_valid_ds, tokenizer, model_checkpoint
+    
 max_input_length = 512
 max_target_length = 30
+
+train_test_valid_ds, tokenizer, model_checkpoint = init_dataset()
+
+## FN - TOKENIZATION
 
 def preprocess_function(examples):
     model_inputs = tokenizer(
@@ -103,25 +117,20 @@ def preprocess_function(examples):
 
 tokenized_datasets = train_test_valid_ds.map(preprocess_function, batched=True)
 
+#Accelerate - set format to torch
+tokenized_datasets.set_format("torch")
+
 generated_summary = "I absolutely loved reading the Hunger Games"
 reference_summary = "I loved reading the Hunger Games"
 
 rouge_score = evaluate.load("rouge")
 scores = rouge_score.compute(predictions=[generated_summary], references=[reference_summary])
 
-print(scores)
-#mid_score = scores["rouge1"].mid
-#print(mid_score)
-
 # import punctuation module to retrieve first few sentences of instructions 
 nltk.download("punkt")
 
-
-
 def three_sentence_summary(text):
     return "\n".join(sent_tokenize(text)[:3])
-
-print(three_sentence_summary(train_test_valid_ds["train"][3][_col_full_text]))
 
 # extract sentences from ds
 def evaluate_baseline(dataset, metric):
@@ -138,9 +147,8 @@ print(rouge_dict)
 
 # load t53
 model = AutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
-
+print("LOADED MODEL")
 # Create summaries
-from transformers import Seq2SeqTrainingArguments
 
 batch_size = 8
 num_train_epochs = 8
@@ -162,6 +170,8 @@ args = Seq2SeqTrainingArguments(
     push_to_hub=True,
 )
 
+## FN - METRICS
+
 def compute_metrics(eval_pred):
     predictions, labels = eval_pred
     # Decode generated summaries into text
@@ -178,10 +188,8 @@ def compute_metrics(eval_pred):
         predictions=decoded_preds, references=decoded_labels, use_stemmer=True
     )
     # Extract the median scores
-    result = {key: value.mid.fmeasure * 100 for key, value in result.items()}
+    result = {key: value* 100 for key, value in result.items()}
     return {k: round(v, 4) for k, v in result.items()}
-
-from transformers import DataCollatorForSeq2Seq
 
 data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
@@ -192,20 +200,191 @@ tokenized_datasets = tokenized_datasets.remove_columns(
 features = [tokenized_datasets["train"][i] for i in range(2)]
 data_collator(features)
 
-from transformers import Seq2SeqTrainer
+def sequential_training():
+    
+    trainer = Seq2SeqTrainer(
+        model,
+        args,
+        train_dataset=tokenized_datasets["train"],
+        eval_dataset=tokenized_datasets["valid"],
+        data_collator=data_collator,
+        tokenizer=tokenizer,
+        compute_metrics=compute_metrics,
+    )
 
-trainer = Seq2SeqTrainer(
-    model,
-    args,
-    train_dataset=tokenized_datasets["train"],
-    eval_dataset=tokenized_datasets["valid"],
-    data_collator=data_collator,
-    tokenizer=tokenizer,
-    compute_metrics=compute_metrics,
-)
+    #trainer.train()
 
-trainer.train()
+    score = trainer.evaluate()
 
-score = trainer.evaluate()
+    print(score)
 
-print(score)
+    trainer.push_to_hub(commit_message="Training complete", tags="summarization")
+
+
+# Accelerate - Use DataLoaders
+
+
+# split generated ummaries into separate chunks
+def postprocess_text(preds, labels):
+    preds = [pred.strip() for pred in preds]
+    labels = [label.strip() for label in labels]
+
+    # ROUGE expects a newline after each sentence
+    preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+    labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+
+    return preds, labels
+
+
+model_name = "test-bert-finetuned-squad-accelerate"
+repo_name = get_full_repo_name(model_name)
+
+output_dir = "results-mt5-finetuned-squad-accelerate"
+
+
+def create_model_repo():
+    try:
+        create_repo(model_name)
+    except:
+        print("Exists")
+
+def repo_exists(repo_id: str, repo_type: Optional[str] = None, token: Optional[str] = None) -> bool:
+    try:
+        repo_info(repo_id, repo_type=repo_type, token=token)
+        return True
+    except RepositoryNotFoundError:
+        return False
+    
+repo = Repository(output_dir, clone_from=repo_name)
+#repo = git_pull(o)
+
+from tqdm.auto import tqdm
+import torch
+import numpy as np
+
+
+def batch_training(model):
+    batch_size = 8
+    train_dataloader = DataLoader(
+        tokenized_datasets["train"],
+        shuffle=True,
+        collate_fn=data_collator,
+        batch_size=batch_size,
+    )
+    eval_dataloader = DataLoader(
+        tokenized_datasets["valid"], collate_fn=data_collator, batch_size=batch_size
+    )
+
+    #accelearate 
+    print('pre-optimizer')
+    optimizer = AdamW(model.parameters(), lr=2e-5)
+
+    # load model into accelerator
+    accelerator = Accelerator()
+    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader
+    )
+
+    # set learning_rate
+    num_train_epochs = 10
+    num_update_steps_per_epoch = len(train_dataloader)
+    num_training_steps = num_train_epochs * num_update_steps_per_epoch
+
+    lr_scheduler = get_scheduler(
+        "linear",
+        optimizer=optimizer,
+        num_warmup_steps=0,
+        num_training_steps=num_training_steps,
+    )
+
+    
+    progress_bar = tqdm(range(num_training_steps))
+
+    for epoch in range(num_train_epochs):
+        # Training
+        model.train()
+        for step, batch in enumerate(train_dataloader):
+            outputs = model(**batch)
+            loss = outputs.loss
+            accelerator.backward(loss)
+
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+            progress_bar.update(1)
+
+        # Evaluation
+        model.eval()
+        for step, batch in enumerate(eval_dataloader):
+            with torch.no_grad():
+                generated_tokens = accelerator.unwrap_model(model).generate(
+                    batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                )
+
+                generated_tokens = accelerator.pad_across_processes(
+                    generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
+                )
+                labels = batch["labels"]
+
+                # If we did not pad to max length, we need to pad the labels too
+                labels = accelerator.pad_across_processes(
+                    batch["labels"], dim=1, pad_index=tokenizer.pad_token_id
+                )
+
+                generated_tokens = accelerator.gather(generated_tokens).cpu().numpy()
+                labels = accelerator.gather(labels).cpu().numpy()
+
+                # Replace -100 in the labels as we can't decode them
+                labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+                if isinstance(generated_tokens, tuple):
+                    generated_tokens = generated_tokens[0]
+                decoded_preds = tokenizer.batch_decode(
+                    generated_tokens, skip_special_tokens=True
+                )
+                decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+                decoded_preds, decoded_labels = postprocess_text(
+                    decoded_preds, decoded_labels
+                )
+
+                rouge_score.add_batch(predictions=decoded_preds, references=decoded_labels)
+
+        # Compute metrics
+        result = rouge_score.compute()
+        # Extract the median ROUGE scores
+        result = {key: value * 100 for key, value in result.items()}
+        result = {k: round(v, 4) for k, v in result.items()}
+        print(f"Epoch {epoch}:", result)
+
+        # Save and upload
+        accelerator.wait_for_everyone()
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
+        if accelerator.is_main_process:
+            tokenizer.save_pretrained(output_dir)
+            repo.push_to_hub(
+                commit_message=f"Training in progress epoch {epoch}", blocking=False
+            )
+
+#sequential_training()
+#batch_training(model)
+
+def print_summary(idx, summarizer):
+    review = train_test_valid_ds["test"][idx]["review_body"]
+    title = train_test_valid_ds["test"][idx]["review_title"]
+    summary = summarizer(train_test_valid_ds["test"][idx]["review_body"])[0]["summary_text"]
+    print(f"'>>> Review: {review}'")
+    print(f"\n'>>> Title: {title}'")
+    print(f"\n'>>> Summary: {summary}'")
+
+from transformers import pipeline
+
+def use_model():
+
+    hub_model_id = "aberry273/"+output_dir
+    summarizer = pipeline("summarization", model=hub_model_id)
+    print_summary(100, summarizer)
+
+
+use_model()
