@@ -35,6 +35,10 @@ from typing import Optional
 classification_ds = "cnmoro/Instruct-PTBR-ENUS-11M"
 _col_summarised_text = "INSTRUCTION"
 _col_full_text = "RESPONSE"
+_summarize_model_name = "test-bert-finetuned-squad-accelerate"
+
+# import punctuation module to retrieve first few sentences of instructions 
+nltk.download("punkt")
 
 ## FN - DATASET
 
@@ -96,10 +100,6 @@ def init_dataset():
 
     return train_test_valid_ds, tokenizer, model_checkpoint
     
-max_input_length = 512
-max_target_length = 30
-
-train_test_valid_ds, tokenizer, model_checkpoint = init_dataset()
 
 ## FN - TOKENIZATION
 
@@ -115,19 +115,7 @@ def preprocess_function(examples):
     model_inputs["labels"] = labels["input_ids"]
     return model_inputs
 
-tokenized_datasets = train_test_valid_ds.map(preprocess_function, batched=True)
 
-#Accelerate - set format to torch
-tokenized_datasets.set_format("torch")
-
-generated_summary = "I absolutely loved reading the Hunger Games"
-reference_summary = "I loved reading the Hunger Games"
-
-rouge_score = evaluate.load("rouge")
-scores = rouge_score.compute(predictions=[generated_summary], references=[reference_summary])
-
-# import punctuation module to retrieve first few sentences of instructions 
-nltk.download("punkt")
 
 def three_sentence_summary(text):
     return "\n".join(sent_tokenize(text)[:3])
@@ -137,38 +125,7 @@ def evaluate_baseline(dataset, metric):
     summaries = [three_sentence_summary(text) for text in dataset[_col_full_text]]
     return metric.compute(predictions=summaries, references=dataset[_col_summarised_text])
 
-# compute scores 
-import pandas as pd
 
-score = evaluate_baseline(train_test_valid_ds["valid"], rouge_score)
-rouge_names = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
-rouge_dict = dict((rn, round(score[rn] * 100, 2)) for rn in rouge_names)
-print(rouge_dict)
-
-# load t53
-model = AutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
-print("LOADED MODEL")
-# Create summaries
-
-batch_size = 8
-num_train_epochs = 8
-# Show the training loss with every epoch
-logging_steps = len(tokenized_datasets["train"]) // batch_size
-model_name = model_checkpoint.split("/")[-1]
-
-args = Seq2SeqTrainingArguments(
-    output_dir=f"{model_name}-{classification_ds}",
-    evaluation_strategy="epoch",
-    learning_rate=5.6e-5,
-    per_device_train_batch_size=batch_size,
-    per_device_eval_batch_size=batch_size,
-    weight_decay=0.01,
-    save_total_limit=3,
-    num_train_epochs=num_train_epochs,
-    predict_with_generate=True,
-    logging_steps=logging_steps,
-    push_to_hub=True,
-)
 
 ## FN - METRICS
 
@@ -190,15 +147,6 @@ def compute_metrics(eval_pred):
     # Extract the median scores
     result = {key: value* 100 for key, value in result.items()}
     return {k: round(v, 4) for k, v in result.items()}
-
-data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
-
-tokenized_datasets = tokenized_datasets.remove_columns(
-    train_test_valid_ds["train"].column_names
-)
-
-features = [tokenized_datasets["train"][i] for i in range(2)]
-data_collator(features)
 
 def sequential_training():
     
@@ -236,11 +184,6 @@ def postprocess_text(preds, labels):
     return preds, labels
 
 
-model_name = "test-bert-finetuned-squad-accelerate"
-repo_name = get_full_repo_name(model_name)
-
-output_dir = "results-mt5-finetuned-squad-accelerate"
-
 
 def create_model_repo():
     try:
@@ -254,9 +197,6 @@ def repo_exists(repo_id: str, repo_type: Optional[str] = None, token: Optional[s
         return True
     except RepositoryNotFoundError:
         return False
-    
-repo = Repository(output_dir, clone_from=repo_name)
-#repo = git_pull(o)
 
 from tqdm.auto import tqdm
 import torch
@@ -367,24 +307,96 @@ def batch_training(model):
                 commit_message=f"Training in progress epoch {epoch}", blocking=False
             )
 
-#sequential_training()
-#batch_training(model)
 
-def print_summary(idx, summarizer):
-    review = train_test_valid_ds["test"][idx]["review_body"]
-    title = train_test_valid_ds["test"][idx]["review_title"]
-    summary = summarizer(train_test_valid_ds["test"][idx]["review_body"])[0]["summary_text"]
-    print(f"'>>> Review: {review}'")
-    print(f"\n'>>> Title: {title}'")
+def print_summary(idx, summarizer, ds):
+    review = ds["test"][idx][_col_full_text]
+    title = ds["test"][idx][_col_summarised_text]
+
+    req_example_text = "Tokenization, when applied to data security, is the process of substituting a sensitive data element with a non-sensitive equivalent, referred to as a token, that has no intrinsic or exploitable meaning or value. The token is a reference (i.e. identifier) that maps back to the sensitive data through a tokenization system. The mapping from original data to a token uses methods that render tokens infeasible to reverse in the absence of the tokenization system, for example using tokens created from random numbers.[3] A one-way cryptographic function is used to convert the original data into tokens, making it difficult to recreate the original data without obtaining entry to the tokenization system's resources.[4] To deliver such services, the system maintains a vault database of tokens that are connected to the corresponding sensitive data. Protecting the system vault is vital to the system, and improved processes must be put in place to offer database integrity and physical security.[5]"
+    req_text = ds["test"][idx][_col_full_text]
+    summary_response = summarizer(req_example_text)
+    summary = summary_response[0]["summary_text"]
+    print(summary_response)
+    #print(f"'>>> Full: {review}'")
+    #print(f"\n'>>> Instruction: {title}'")
     print(f"\n'>>> Summary: {summary}'")
 
 from transformers import pipeline
 
-def use_model():
-
-    hub_model_id = "aberry273/"+output_dir
+def use_model(hub_model_id, ds):
     summarizer = pipeline("summarization", model=hub_model_id)
-    print_summary(100, summarizer)
+    print_summary(100, summarizer, ds)
 
 
-use_model()
+def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
+    max_input_length = 512
+    max_target_length = 30
+
+    tokenized_datasets = train_test_valid_ds.map(preprocess_function, batched=True)
+
+    #Accelerate - set format to torch
+    tokenized_datasets.set_format("torch")
+
+    generated_summary = "I absolutely loved reading the Hunger Games"
+    reference_summary = "I loved reading the Hunger Games"
+
+    rouge_score = evaluate.load("rouge")
+    scores = rouge_score.compute(predictions=[generated_summary], references=[reference_summary])
+
+    # compute scores 
+    score = evaluate_baseline(train_test_valid_ds["valid"], rouge_score)
+    rouge_names = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
+    rouge_dict = dict((rn, round(score[rn] * 100, 2)) for rn in rouge_names)
+    print(rouge_dict)
+
+    # load t53
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
+    print("LOADED MODEL")
+    # Create summaries
+
+    batch_size = 8
+    num_train_epochs = 8
+    # Show the training loss with every epoch
+    logging_steps = len(tokenized_datasets["train"]) // batch_size
+    model_name = model_checkpoint.split("/")[-1]
+
+    args = Seq2SeqTrainingArguments(
+        output_dir=f"{model_name}-{classification_ds}",
+        evaluation_strategy="epoch",
+        learning_rate=5.6e-5,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        weight_decay=0.01,
+        save_total_limit=3,
+        num_train_epochs=num_train_epochs,
+        predict_with_generate=True,
+        logging_steps=logging_steps,
+        push_to_hub=True,
+    )
+
+    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+
+    tokenized_datasets = tokenized_datasets.remove_columns(
+        train_test_valid_ds["train"].column_names
+    )
+
+    features = [tokenized_datasets["train"][i] for i in range(2)]
+    data_collator(features)
+
+    repo_name = get_full_repo_name(_summarize_model_name)
+
+    output_dir = "results-mt5-finetuned-squad-accelerate"
+
+    repo = Repository(output_dir, clone_from=repo_name)
+    #repo = git_pull(o)
+
+
+    #sequential_training()
+    #batch_training(model)
+
+
+train_test_valid_ds, tokenizer, model_checkpoint = init_dataset()
+#run_training(train_test_valid_ds, tokenizer, model_checkpoint)
+
+output_model_id = "aberry273/"+_summarize_model_name
+use_model(output_model_id, train_test_valid_ds)
