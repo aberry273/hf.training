@@ -3,6 +3,8 @@ from itertools import accumulate
 import torch
 import numpy as np
 import pandas as pd
+from datasets import Dataset 
+import pandas as pd 
 
 # charts
 from matplotlib import pyplot as plt
@@ -32,15 +34,30 @@ import nltk
 from nltk.tokenize import sent_tokenize
 from typing import Optional
 
-classification_ds = "cnmoro/Instruct-PTBR-ENUS-11M"
-_col_summarised_text = "INSTRUCTION"
-_col_full_text = "RESPONSE"
+# OLD
+#_ds_source_classification = "cnmoro/Instruct-PTBR-ENUS-11M"
+#_col_summarised_text = "INSTRUCTION"
+#_col_full_text = "RESPONSE"
+_train_filepath = "input/summary_train.csv"
+_test_filepath = "input/summary_test.csv"
 _summarize_model_name = "test-bert-finetuned-squad-accelerate"
+
+_ds_source_classification = "stevied67/autotrain-data-pegasus-reddit-summarizer"
+_col_summarised_text = "summary"
+_col_full_text = "selftext"
 
 # import punctuation module to retrieve first few sentences of instructions 
 nltk.download("punkt")
 
 ## FN - DATASET
+
+def dataset_from_csv():
+    train = pd.read_csv(_train_filepath)
+    test = pd.read_csv(_test_filepath)
+    df = pd.concat([train, test])
+    dataset = Dataset.from_pandas(df)
+    dataset.shuffle(seed=42)
+    return dataset
 
 def is_en(x): return ( x["LANGUAGE"] == "en" )
 
@@ -77,19 +94,25 @@ def show_histogram(df, colname):
 
 def init_dataset():
     # Load datasets
-    dataset = load_dataset(classification_ds, split="train")
+    #dataset = load_dataset(_ds_source_classification, split="train")
+    
+    #dataset = load_dataset(_ds_source_classification)
+    dataset = dataset_from_csv()
+    print(dataset)
+    
     # Filter english only
     # Ignore, include portugese so the model doesn't overfit to english
-    filtered_dict = dataset.filter(is_en)
-    filtered_dict = filtered_dict.shuffle(seed=42).select(range(50000))
+    #filtered_dict = dataset.filter(is_en)
+    #filtered_dict = filtered_dict.shuffle(seed=42).select(range(50000))
+    filtered_dict = dataset
 
     get_word_count(filtered_dict, _col_summarised_text)
     print(dataset)
     # show_histogram(df_count, "INSTRUCTION_COUNT")
 
+    print(filtered_dict)
     train_test_valid_ds = split_train_test_valid(filtered_dict)
 
-    print(filtered_dict)
     #show_samples(train_test_valid_ds, filtered_dict.features)
 
     model_checkpoint = "google/mt5-small"
@@ -104,6 +127,8 @@ def init_dataset():
 ## FN - TOKENIZATION
 
 def preprocess_function(examples):
+    max_input_length = 512
+    max_target_length = 30
     model_inputs = tokenizer(
         examples[_col_full_text],
         max_length=max_input_length,
@@ -141,6 +166,7 @@ def compute_metrics(eval_pred):
     decoded_preds = ["\n".join(sent_tokenize(pred.strip())) for pred in decoded_preds]
     decoded_labels = ["\n".join(sent_tokenize(label.strip())) for label in decoded_labels]
     # Compute ROUGE scores
+    rouge_score = evaluate.load("rouge")
     result = rouge_score.compute(
         predictions=decoded_preds, references=decoded_labels, use_stemmer=True
     )
@@ -148,7 +174,7 @@ def compute_metrics(eval_pred):
     result = {key: value* 100 for key, value in result.items()}
     return {k: round(v, 4) for k, v in result.items()}
 
-def sequential_training():
+def sequential_training(model, args, tokenized_datasets, data_collator):
     
     trainer = Seq2SeqTrainer(
         model,
@@ -160,7 +186,7 @@ def sequential_training():
         compute_metrics=compute_metrics,
     )
 
-    #trainer.train()
+    trainer.train()
 
     score = trainer.evaluate()
 
@@ -185,7 +211,7 @@ def postprocess_text(preds, labels):
 
 
 
-def create_model_repo():
+def create_model_repo(model_name):
     try:
         create_repo(model_name)
     except:
@@ -203,7 +229,7 @@ import torch
 import numpy as np
 
 
-def batch_training(model):
+def batch_training(model, tokenized_datasets, data_collator):
     batch_size = 8
     train_dataloader = DataLoader(
         tokenized_datasets["train"],
@@ -230,6 +256,7 @@ def batch_training(model):
     num_update_steps_per_epoch = len(train_dataloader)
     num_training_steps = num_train_epochs * num_update_steps_per_epoch
 
+    rouge_score = evaluate.load("rouge")
     lr_scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
@@ -237,6 +264,9 @@ def batch_training(model):
         num_training_steps=num_training_steps,
     )
 
+    repo_name = get_full_repo_name(_summarize_model_name)
+    output_dir = "results-"+_summarize_model_name
+    repo = Repository(output_dir, clone_from=repo_name)
     
     progress_bar = tqdm(range(num_training_steps))
 
@@ -314,6 +344,7 @@ def print_summary(idx, summarizer, ds):
 
     req_example_text = "Tokenization, when applied to data security, is the process of substituting a sensitive data element with a non-sensitive equivalent, referred to as a token, that has no intrinsic or exploitable meaning or value. The token is a reference (i.e. identifier) that maps back to the sensitive data through a tokenization system. The mapping from original data to a token uses methods that render tokens infeasible to reverse in the absence of the tokenization system, for example using tokens created from random numbers.[3] A one-way cryptographic function is used to convert the original data into tokens, making it difficult to recreate the original data without obtaining entry to the tokenization system's resources.[4] To deliver such services, the system maintains a vault database of tokens that are connected to the corresponding sensitive data. Protecting the system vault is vital to the system, and improved processes must be put in place to offer database integrity and physical security.[5]"
     req_text = ds["test"][idx][_col_full_text]
+    
     summary_response = summarizer(req_example_text)
     summary = summary_response[0]["summary_text"]
     print(summary_response)
@@ -329,8 +360,6 @@ def use_model(hub_model_id, ds):
 
 
 def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
-    max_input_length = 512
-    max_target_length = 30
 
     tokenized_datasets = train_test_valid_ds.map(preprocess_function, batched=True)
 
@@ -341,7 +370,7 @@ def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
     reference_summary = "I loved reading the Hunger Games"
 
     rouge_score = evaluate.load("rouge")
-    scores = rouge_score.compute(predictions=[generated_summary], references=[reference_summary])
+    #scores = rouge_score.compute(predictions=[generated_summary], references=[reference_summary])
 
     # compute scores 
     score = evaluate_baseline(train_test_valid_ds["valid"], rouge_score)
@@ -361,7 +390,7 @@ def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
     model_name = model_checkpoint.split("/")[-1]
 
     args = Seq2SeqTrainingArguments(
-        output_dir=f"{model_name}-{classification_ds}",
+        output_dir=f"{model_name}-{_ds_source_classification}",
         evaluation_strategy="epoch",
         learning_rate=5.6e-5,
         per_device_train_batch_size=batch_size,
@@ -383,20 +412,15 @@ def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
     features = [tokenized_datasets["train"][i] for i in range(2)]
     data_collator(features)
 
-    repo_name = get_full_repo_name(_summarize_model_name)
-
-    output_dir = "results-mt5-finetuned-squad-accelerate"
-
-    repo = Repository(output_dir, clone_from=repo_name)
     #repo = git_pull(o)
 
 
-    #sequential_training()
-    #batch_training(model)
+    #sequential_training(model, args, tokenized_datasets, data_collator)
+    batch_training(model, tokenized_datasets, data_collator)
 
 
 train_test_valid_ds, tokenizer, model_checkpoint = init_dataset()
-#run_training(train_test_valid_ds, tokenizer, model_checkpoint)
+run_training(train_test_valid_ds, tokenizer, model_checkpoint)
 
 output_model_id = "aberry273/"+_summarize_model_name
 use_model(output_model_id, train_test_valid_ds)
