@@ -353,7 +353,7 @@ def print_summary(idx, summarizer, ds):
     
     summary_response = summarizer(req_example_text)
     summary = summary_response[0]["summary_text"]
-    print(summary_response)
+    #print(summary_response)
     #print(f"'>>> Full: {review}'")
     #print(f"\n'>>> Instruction: {title}'")
     print(f"\n'>>> Summary: {summary}'")
