@@ -40,7 +40,7 @@ from typing import Optional
 #_col_full_text = "RESPONSE"
 _train_filepath = "input/summary_train.csv"
 _test_filepath = "input/summary_test.csv"
-_summarize_model_name = "test-bert-finetuned-squad-accelerate"
+_summarize_model_name = "reddit-summary-bert-finetuned-squad-accelerate"
 
 _ds_source_classification = "stevied67/autotrain-data-pegasus-reddit-summarizer"
 _col_summarised_text = "summary"
@@ -342,10 +342,9 @@ def print_summary(idx, summarizer, ds):
     review = ds["test"][idx][_col_full_text]
     title = ds["test"][idx][_col_summarised_text]
 
-    req_example_text = "Tokenization, when applied to data security, is the process of substituting a sensitive data element with a non-sensitive equivalent, referred to as a token, that has no intrinsic or exploitable meaning or value. The token is a reference (i.e. identifier) that maps back to the sensitive data through a tokenization system. The mapping from original data to a token uses methods that render tokens infeasible to reverse in the absence of the tokenization system, for example using tokens created from random numbers.[3] A one-way cryptographic function is used to convert the original data into tokens, making it difficult to recreate the original data without obtaining entry to the tokenization system's resources.[4] To deliver such services, the system maintains a vault database of tokens that are connected to the corresponding sensitive data. Protecting the system vault is vital to the system, and improved processes must be put in place to offer database integrity and physical security.[5]"
     req_text = ds["test"][idx][_col_full_text]
     
-    summary_response = summarizer(req_example_text)
+    summary_response = summarizer(req_text)
     summary = summary_response[0]["summary_text"]
     print(summary_response)
     #print(f"'>>> Full: {review}'")
@@ -354,9 +353,14 @@ def print_summary(idx, summarizer, ds):
 
 from transformers import pipeline
 
-def use_model(hub_model_id, ds):
+def summarize_text_with_model(hub_model_id, request_text):
     summarizer = pipeline("summarization", model=hub_model_id)
-    print_summary(100, summarizer, ds)
+
+    summary_response = summarizer(request_text)
+    summary = summary_response[0]["summary_text"]
+
+    print(f"\n'>>> Summary: {summary}'")
+    #print_summary(100, summarizer, ds)
 
 
 def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
@@ -420,7 +424,10 @@ def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
 
 
 train_test_valid_ds, tokenizer, model_checkpoint = init_dataset()
-run_training(train_test_valid_ds, tokenizer, model_checkpoint)
+#run_training(train_test_valid_ds, tokenizer, model_checkpoint)
 
-output_model_id = "aberry273/"+_summarize_model_name
-use_model(output_model_id, train_test_valid_ds)
+model = "aberry273/"+_summarize_model_name
+
+req_example_text = "Tokenization, when applied to data security, is the process of substituting a sensitive data element with a non-sensitive equivalent, referred to as a token, that has no intrinsic or exploitable meaning or value. The token is a reference (i.e. identifier) that maps back to the sensitive data through a tokenization system. The mapping from original data to a token uses methods that render tokens infeasible to reverse in the absence of the tokenization system, for example using tokens created from random numbers.[3] A one-way cryptographic function is used to convert the original data into tokens, making it difficult to recreate the original data without obtaining entry to the tokenization system's resources.[4] To deliver such services, the system maintains a vault database of tokens that are connected to the corresponding sensitive data. Protecting the system vault is vital to the system, and improved processes must be put in place to offer database integrity and physical security.[5]"
+    
+summarize_text_with_model(model, req_example_text)
