@@ -40,7 +40,8 @@ from typing import Optional
 #_col_full_text = "RESPONSE"
 _train_filepath = "input/summary_train.csv"
 _test_filepath = "input/summary_test.csv"
-_summarize_model_name = "test-bert-finetuned-squad-accelerate"
+_summarize_model_name = "reddit-summary-bert-finetuned-squad-accelerate"
+_summarize_output_model_id = "aberry273/"+_summarize_model_name
 
 _ds_source_classification = "stevied67/autotrain-data-pegasus-reddit-summarizer"
 _col_summarised_text = "summary"
@@ -221,7 +222,7 @@ def repo_exists(repo_id: str, repo_type: Optional[str] = None, token: Optional[s
     try:
         repo_info(repo_id, repo_type=repo_type, token=token)
         return True
-    except RepositoryNotFoundError:
+    except:
         return False
 
 from tqdm.auto import tqdm
@@ -265,9 +266,14 @@ def batch_training(model, tokenized_datasets, data_collator):
     )
 
     repo_name = get_full_repo_name(_summarize_model_name)
-    output_dir = "results-"+_summarize_model_name
-    repo = Repository(output_dir, clone_from=repo_name)
-    
+    output_dir = _summarize_model_name
+    repo = None
+    if(repo_exists(_summarize_output_model_id)):
+        repo = Repository(output_dir, clone_from=repo_name)
+    else: 
+        create_model_repo(_summarize_output_model_id)
+        repo = Repository(output_dir, clone_from=repo_name)
+
     progress_bar = tqdm(range(num_training_steps))
 
     for epoch in range(num_train_epochs):
@@ -422,5 +428,4 @@ def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
 train_test_valid_ds, tokenizer, model_checkpoint = init_dataset()
 run_training(train_test_valid_ds, tokenizer, model_checkpoint)
 
-output_model_id = "aberry273/"+_summarize_model_name
-use_model(output_model_id, train_test_valid_ds)
+use_model(_summarize_output_model_id, train_test_valid_ds)
