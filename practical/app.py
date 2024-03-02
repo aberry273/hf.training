@@ -41,6 +41,9 @@ from typing import Optional
 _train_filepath = "input/summary_train.csv"
 _test_filepath = "input/summary_test.csv"
 _summarize_model_name = "reddit-summary-bert-finetuned-squad-accelerate"
+_summarize_output_model_id = "aberry273/"+_summarize_model_name
+
+_base_model_checkpoint = "google/pegasus-large"
 
 _ds_source_classification = "stevied67/autotrain-data-pegasus-reddit-summarizer"
 _col_summarised_text = "summary"
@@ -98,7 +101,6 @@ def init_dataset():
     
     #dataset = load_dataset(_ds_source_classification)
     dataset = dataset_from_csv()
-    print(dataset)
     
     # Filter english only
     # Ignore, include portugese so the model doesn't overfit to english
@@ -115,13 +117,9 @@ def init_dataset():
 
     #show_samples(train_test_valid_ds, filtered_dict.features)
 
-    model_checkpoint = "google/mt5-small"
-    tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained(_base_model_checkpoint)
 
-    inputs = tokenizer("I loved reading the Hunger Games!")
-    tokenizer.convert_ids_to_tokens(inputs.input_ids)
-
-    return train_test_valid_ds, tokenizer, model_checkpoint
+    return train_test_valid_ds, tokenizer
     
 
 ## FN - TOKENIZATION
@@ -221,7 +219,7 @@ def repo_exists(repo_id: str, repo_type: Optional[str] = None, token: Optional[s
     try:
         repo_info(repo_id, repo_type=repo_type, token=token)
         return True
-    except RepositoryNotFoundError:
+    except:
         return False
 
 from tqdm.auto import tqdm
@@ -265,9 +263,14 @@ def batch_training(model, tokenized_datasets, data_collator):
     )
 
     repo_name = get_full_repo_name(_summarize_model_name)
-    output_dir = "results-"+_summarize_model_name
-    repo = Repository(output_dir, clone_from=repo_name)
-    
+    output_dir = _summarize_model_name
+    repo = None
+    if(repo_exists(_summarize_output_model_id)):
+        repo = Repository(output_dir, clone_from=repo_name)
+    else: 
+        create_model_repo(_summarize_output_model_id)
+        repo = Repository(output_dir, clone_from=repo_name)
+
     progress_bar = tqdm(range(num_training_steps))
 
     for epoch in range(num_train_epochs):
@@ -346,14 +349,14 @@ def print_summary(idx, summarizer, ds):
     
     summary_response = summarizer(req_text)
     summary = summary_response[0]["summary_text"]
-    print(summary_response)
+    #print(summary_response)
     #print(f"'>>> Full: {review}'")
     #print(f"\n'>>> Instruction: {title}'")
     print(f"\n'>>> Summary: {summary}'")
 
 from transformers import pipeline
 
-def summarize_text_with_model(hub_model_id, request_text):
+def summarize_text_with_model_pipeline(hub_model_id, request_text):
     summarizer = pipeline("summarization", model=hub_model_id)
 
     summary_response = summarizer(request_text)
@@ -363,15 +366,25 @@ def summarize_text_with_model(hub_model_id, request_text):
     #print_summary(100, summarizer, ds)
 
 
-def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
+def summarize_text_with_model(hub_model_id, request_text):
+    
+    tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
+    inputs = tokenizer(request_text, return_tensors="pt").input_ids
+    
+    model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
+    outputs = model.generate(inputs,  do_sample=True)
+    
+    summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    print(f"\n'{summary}'")
+    #print_summary(100, summarizer, ds)
+
+def run_training(train_test_valid_ds, tokenizer):
 
     tokenized_datasets = train_test_valid_ds.map(preprocess_function, batched=True)
 
     #Accelerate - set format to torch
     tokenized_datasets.set_format("torch")
-
-    generated_summary = "I absolutely loved reading the Hunger Games"
-    reference_summary = "I loved reading the Hunger Games"
 
     rouge_score = evaluate.load("rouge")
     #scores = rouge_score.compute(predictions=[generated_summary], references=[reference_summary])
@@ -383,7 +396,7 @@ def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
     print(rouge_dict)
 
     # load t53
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
+    model = AutoModelForSeq2SeqLM.from_pretrained(_base_model_checkpoint)
     print("LOADED MODEL")
     # Create summaries
 
@@ -391,7 +404,7 @@ def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
     num_train_epochs = 8
     # Show the training loss with every epoch
     logging_steps = len(tokenized_datasets["train"]) // batch_size
-    model_name = model_checkpoint.split("/")[-1]
+    model_name = _base_model_checkpoint.split("/")[-1]
 
     args = Seq2SeqTrainingArguments(
         output_dir=f"{model_name}-{_ds_source_classification}",
@@ -423,11 +436,14 @@ def run_training(train_test_valid_ds, tokenizer, model_checkpoint):
     batch_training(model, tokenized_datasets, data_collator)
 
 
-train_test_valid_ds, tokenizer, model_checkpoint = init_dataset()
-#run_training(train_test_valid_ds, tokenizer, model_checkpoint)
+train_test_valid_ds, tokenizer = init_dataset()
+print(train_test_valid_ds)
+#run_training(train_test_valid_ds, tokenizer)
 
 model = "aberry273/"+_summarize_model_name
 
-req_example_text = "Tokenization, when applied to data security, is the process of substituting a sensitive data element with a non-sensitive equivalent, referred to as a token, that has no intrinsic or exploitable meaning or value. The token is a reference (i.e. identifier) that maps back to the sensitive data through a tokenization system. The mapping from original data to a token uses methods that render tokens infeasible to reverse in the absence of the tokenization system, for example using tokens created from random numbers.[3] A one-way cryptographic function is used to convert the original data into tokens, making it difficult to recreate the original data without obtaining entry to the tokenization system's resources.[4] To deliver such services, the system maintains a vault database of tokens that are connected to the corresponding sensitive data. Protecting the system vault is vital to the system, and improved processes must be put in place to offer database integrity and physical security.[5]"
-    
+req_example_text = "Replacing live data with tokens in systems is intended to minimize exposure of sensitive data to those applications, stores, people and processes, reducing risk of compromise or accidental exposure and unauthorized access to sensitive data. Applications can operate using tokens instead of live data, with the exception of a small number of trusted applications explicitly permitted to detokenize when strictly necessary for an approved business purpose. Tokenization systems may be operated in-house within a secure isolated segment of the data center, or as a service from a secure service provider."
+
+summarize_text_with_model_pipeline(model, req_example_text)
+
 summarize_text_with_model(model, req_example_text)
