@@ -1,5 +1,6 @@
 # defaults
 from itertools import accumulate
+from urllib import request
 import torch
 import numpy as np
 import pandas as pd
@@ -12,7 +13,7 @@ from matplotlib import pyplot as plt
 # huggingface
 
 ## transformers
-from transformers import pipeline, BertConfig, BertModel, AutoTokenizer, DataCollatorWithPadding, AutoTokenizer, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq, Seq2SeqTrainer, get_scheduler
+from transformers import pipeline, BertConfig, BertModel, AutoTokenizer, DataCollatorWithPadding, AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq, Seq2SeqTrainer, get_scheduler
 
 from accelerate import Accelerator
 from huggingface_hub import Repository, get_full_repo_name, create_repo, repo_info
@@ -22,6 +23,8 @@ from lib2to3.pgen2.tokenize import tokenize
 from sre_parse import Tokenizer
 from unittest.util import _MAX_LENGTH
 from tqdm.auto import tqdm
+import gc
+
 
 ## datasets
 from datasets import load_dataset, DatasetDict, Dataset
@@ -42,12 +45,12 @@ from articles import get_article
 #_col_full_text = "RESPONSE"
 _train_filepath = "input/summary_train.csv"
 _test_filepath = "input/summary_test.csv"
-_summarize_model_name = "reddit-summary-bert-finetuned-squad-accelerate"
+_base_model_checkpoint = "sshleifer/distilbart-cnn-12-6"
+
+_summarize_model_name = f"results-reddit-summarizer-distilbart-finetuned"
 _summarize_output_model_id = "aberry273/"+_summarize_model_name
 
-_base_model_checkpoint = "google/pegasus-large"
-
-_ds_source_classification = "stevied67/autotrain-data-pegasus-reddit-summarizer"
+_ds_source_classification = f"stevied67/autotrain-data-bert-reddit-summarizer"
 _col_summarised_text = "summary"
 _col_full_text = "selftext"
 
@@ -227,8 +230,8 @@ import torch
 import numpy as np
 
 
-def batch_training(model, args, tokenized_datasets, data_collator):
-
+def accelerate_training(model, args, tokenized_datasets, data_collator):
+    batch_size = 8
     train_dataloader = DataLoader(
         tokenized_datasets["train"],
         shuffle=True,
@@ -250,7 +253,7 @@ def batch_training(model, args, tokenized_datasets, data_collator):
     )
 
     # set learning_rate
-    #num_train_epochs = 10
+    num_train_epochs = 2
     num_update_steps_per_epoch = len(train_dataloader)
     num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
 
@@ -358,24 +361,48 @@ from transformers import pipeline
 
 def summarize_text_with_model_pipeline(hub_model_id, request_text):
     request_text = "Summarize: "+request_text
+    # max_new_tokens=250, max_length=
+    max_len = 50#int(len(request_text) * .5)
+    min_len = 5
+    summarizer = pipeline(
+        "summarization", 
+        model=hub_model_id, 
+        #max_length=max_len, 
+        min_length=min_len
+        )
 
-    summarizer = pipeline("summarization", model=hub_model_id, max_new_tokens=250)
+    texts = []
+    if(len(request_text) < 2048):
+        summary_response = summarizer(request_text)
+        texts = summary_response[0]["summary_text"].split('.')
+    else:
+        summary_response = summarizer(request_text[0:2048])
+        texts = summary_response[0]["summary_text"].split('.')
+        #return 'TBC: Text over 2048'
+        #texts = request_text.split('.')
+        #for text in texts:
+    texts = [f'- {i}\n' for i in texts]
+    return ''.join(texts)
 
-    summary_response = summarizer(request_text)
-    summary = summary_response[0]["summary_text"]
-
-    return summary
-    #print_summary(100, summarizer, ds)
+def get_tokenizer_and_model(hub_model_id):
+    tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
+    # for other
+    model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
+    # for "google/gemma-7b"
+   # model = AutoModelForCausalLM.from_pretrained(hub_model_id, device_map="auto")
+    return tokenizer, model
 
 
 def summarize_text_with_model(hub_model_id, request_text):
     request_text = request_text
 
-    tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
+    #tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
+    #model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
+    tokenizer, model = get_tokenizer_and_model(hub_model_id)
+    
     inputs = tokenizer(request_text, return_tensors="pt").input_ids
     
-    model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
-    outputs = model.generate(inputs, max_new_tokens=250)
+    outputs = model.generate(inputs, do_sample=True, max_new_tokens=250)
     
     summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
@@ -399,12 +426,13 @@ def run_training(train_test_valid_ds, tokenizer):
     print(rouge_dict)
 
     # load t53
-    model = AutoModelForSeq2SeqLM.from_pretrained(_base_model_checkpoint)
+    tokenizer, model = get_tokenizer_and_model(_base_model_checkpoint)
+    #model = AutoModelForSeq2SeqLM.from_pretrained(_base_model_checkpoint)
     print("LOADED MODEL")
     # Create summaries
 
     batch_size = 8
-    num_train_epochs = 8
+    num_train_epochs = 10
     # Show the training loss with every epoch
     logging_steps = len(tokenized_datasets["train"]) // batch_size
     model_name = _base_model_checkpoint.split("/")[-1]
@@ -436,7 +464,8 @@ def run_training(train_test_valid_ds, tokenizer):
 
 
     #sequential_training(model, args, tokenized_datasets, data_collator)
-    batch_training(model, args, tokenized_datasets, data_collator)
+    accelerate_training(model, args, tokenized_datasets, data_collator)
+
 
 # DATASET
 train_test_valid_ds, tokenizer = init_dataset()
@@ -453,11 +482,11 @@ article = get_article('Garbage collection (computer science)')
 def summarize_article(article):
     article_title = article['title']
     article_summary = summarize_text_with_model_pipeline(model, article['text'])
-    print(f"\n'{article_title}: {article_summary}'")
+    print(f"\n{article_title}:\n{article_summary}")
 
     for subtopic in article['subtopics']:
         sub_title = subtopic['title']
         sub_summary = summarize_text_with_model_pipeline(model, subtopic['text'])
-        print(f"\n' > {sub_title}: {sub_summary}'")
+        print(f"\n> {sub_title}:\n{sub_summary}")
 
 summarize_article(article)
