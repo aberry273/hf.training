@@ -43,12 +43,12 @@ from typing import Optional
 #_col_full_text = "RESPONSE"
 _train_filepath = "input/summary_train.csv"
 _test_filepath = "input/summary_test.csv"
-_summarize_model_name = "reddit-summary-pegagus-finetuned-squad-accelerate"
+_base_model_checkpoint = "sshleifer/distilbart-cnn-12-6"
+
+_summarize_model_name = f"results-reddit-summarizer-distilbart-finetuned"
 _summarize_output_model_id = "aberry273/"+_summarize_model_name
 
-_base_model_checkpoint = "google/gemma-7b"
-
-_ds_source_classification = "stevied67/autotrain-data-gemma7b-reddit-summarizer"
+_ds_source_classification = f"stevied67/autotrain-data-bert-reddit-summarizer"
 _col_summarised_text = "summary"
 _col_full_text = "selftext"
 
@@ -230,7 +230,7 @@ import torch
 import numpy as np
 
 
-def batch_training(model, tokenized_datasets, data_collator):
+def accelerate_training(model, tokenized_datasets, data_collator):
     batch_size = 8
     train_dataloader = DataLoader(
         tokenized_datasets["train"],
@@ -246,10 +246,6 @@ def batch_training(model, tokenized_datasets, data_collator):
     print('pre-optimizer')
     optimizer = AdamW(model.parameters(), lr=2e-5)
 
-    # empty gc
-    gc.collect()
-    torch.cuda.empty_cache()
-
     # load model into accelerator
     accelerator = Accelerator()
     model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
@@ -257,7 +253,7 @@ def batch_training(model, tokenized_datasets, data_collator):
     )
 
     # set learning_rate
-    num_train_epochs = 10
+    num_train_epochs = 2
     num_update_steps_per_epoch = len(train_dataloader)
     num_training_steps = num_train_epochs * num_update_steps_per_epoch
 
@@ -375,11 +371,10 @@ def summarize_text_with_model_pipeline(hub_model_id, request_text):
 def get_tokenizer_and_model(hub_model_id):
     tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
     # for other
-    #model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
+    model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
     # for "google/gemma-7b"
-    model = AutoModelForCausalLM.from_pretrained(hub_model_id)
+   # model = AutoModelForCausalLM.from_pretrained(hub_model_id, device_map="auto")
     return tokenizer, model
-   # model = AutoModelForCausalLM.from_pretrained("google/gemma-7b", device_map="auto")
 
 
 def summarize_text_with_model(hub_model_id, request_text):
@@ -418,8 +413,8 @@ def run_training(train_test_valid_ds, tokenizer):
     print("LOADED MODEL")
     # Create summaries
 
-    batch_size = 4
-    num_train_epochs = 8
+    batch_size = 8
+    num_train_epochs = 10
     # Show the training loss with every epoch
     logging_steps = len(tokenized_datasets["train"]) // batch_size
     model_name = _base_model_checkpoint.split("/")[-1]
@@ -450,8 +445,8 @@ def run_training(train_test_valid_ds, tokenizer):
     #repo = git_pull(o)
 
 
-    sequential_training(model, args, tokenized_datasets, data_collator)
-    #batch_training(model, tokenized_datasets, data_collator)
+    #sequential_training(model, args, tokenized_datasets, data_collator)
+    accelerate_training(model, tokenized_datasets, data_collator)
 
 
 train_test_valid_ds, tokenizer = init_dataset()
