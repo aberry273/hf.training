@@ -12,7 +12,7 @@ from matplotlib import pyplot as plt
 # huggingface
 
 ## transformers
-from transformers import pipeline, BertConfig, BertModel, AutoTokenizer, DataCollatorWithPadding, AutoTokenizer, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq, Seq2SeqTrainer, get_scheduler
+from transformers import pipeline, BertConfig, BertModel, AutoTokenizer, DataCollatorWithPadding, AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq, Seq2SeqTrainer, get_scheduler
 
 from accelerate import Accelerator
 from huggingface_hub import Repository, get_full_repo_name, create_repo, repo_info
@@ -22,6 +22,8 @@ from lib2to3.pgen2.tokenize import tokenize
 from sre_parse import Tokenizer
 from unittest.util import _MAX_LENGTH
 from tqdm.auto import tqdm
+import gc
+
 
 ## datasets
 from datasets import load_dataset, DatasetDict, Dataset
@@ -34,18 +36,19 @@ import nltk
 from nltk.tokenize import sent_tokenize
 from typing import Optional
 
+
 # OLD
 #_ds_source_classification = "cnmoro/Instruct-PTBR-ENUS-11M"
 #_col_summarised_text = "INSTRUCTION"
 #_col_full_text = "RESPONSE"
 _train_filepath = "input/summary_train.csv"
 _test_filepath = "input/summary_test.csv"
-_summarize_model_name = "reddit-summary-bert-finetuned-squad-accelerate"
+_summarize_model_name = "reddit-summary-pegagus-finetuned-squad-accelerate"
 _summarize_output_model_id = "aberry273/"+_summarize_model_name
 
-_base_model_checkpoint = "google/pegasus-large"
+_base_model_checkpoint = "google/gemma-7b"
 
-_ds_source_classification = "stevied67/autotrain-data-pegasus-reddit-summarizer"
+_ds_source_classification = "stevied67/autotrain-data-gemma7b-reddit-summarizer"
 _col_summarised_text = "summary"
 _col_full_text = "selftext"
 
@@ -243,6 +246,10 @@ def batch_training(model, tokenized_datasets, data_collator):
     print('pre-optimizer')
     optimizer = AdamW(model.parameters(), lr=2e-5)
 
+    # empty gc
+    gc.collect()
+    torch.cuda.empty_cache()
+
     # load model into accelerator
     accelerator = Accelerator()
     model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
@@ -365,13 +372,23 @@ def summarize_text_with_model_pipeline(hub_model_id, request_text):
     print(f"\n'>>> Summary: {summary}'")
     #print_summary(100, summarizer, ds)
 
+def get_tokenizer_and_model(hub_model_id):
+    tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
+    # for other
+    #model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
+    # for "google/gemma-7b"
+    model = AutoModelForCausalLM.from_pretrained(hub_model_id)
+    return tokenizer, model
+   # model = AutoModelForCausalLM.from_pretrained("google/gemma-7b", device_map="auto")
+
 
 def summarize_text_with_model(hub_model_id, request_text):
     
-    tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
     inputs = tokenizer(request_text, return_tensors="pt").input_ids
     
-    model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
+    #tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
+    #model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
+    tokenizer, model = get_tokenizer_and_model(hub_model_id)
     outputs = model.generate(inputs,  do_sample=True)
     
     summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -396,11 +413,12 @@ def run_training(train_test_valid_ds, tokenizer):
     print(rouge_dict)
 
     # load t53
-    model = AutoModelForSeq2SeqLM.from_pretrained(_base_model_checkpoint)
+    tokenizer, model = get_tokenizer_and_model(_base_model_checkpoint)
+    #model = AutoModelForSeq2SeqLM.from_pretrained(_base_model_checkpoint)
     print("LOADED MODEL")
     # Create summaries
 
-    batch_size = 8
+    batch_size = 4
     num_train_epochs = 8
     # Show the training loss with every epoch
     logging_steps = len(tokenized_datasets["train"]) // batch_size
@@ -432,13 +450,13 @@ def run_training(train_test_valid_ds, tokenizer):
     #repo = git_pull(o)
 
 
-    #sequential_training(model, args, tokenized_datasets, data_collator)
-    batch_training(model, tokenized_datasets, data_collator)
+    sequential_training(model, args, tokenized_datasets, data_collator)
+    #batch_training(model, tokenized_datasets, data_collator)
 
 
 train_test_valid_ds, tokenizer = init_dataset()
 print(train_test_valid_ds)
-#run_training(train_test_valid_ds, tokenizer)
+run_training(train_test_valid_ds, tokenizer)
 
 model = "aberry273/"+_summarize_model_name
 
