@@ -34,6 +34,8 @@ import nltk
 from nltk.tokenize import sent_tokenize
 from typing import Optional
 
+from articles import get_article
+
 # OLD
 #_ds_source_classification = "cnmoro/Instruct-PTBR-ENUS-11M"
 #_col_summarised_text = "INSTRUCTION"
@@ -109,10 +111,8 @@ def init_dataset():
     filtered_dict = dataset
 
     get_word_count(filtered_dict, _col_summarised_text)
-    print(dataset)
     # show_histogram(df_count, "INSTRUCTION_COUNT")
 
-    print(filtered_dict)
     train_test_valid_ds = split_train_test_valid(filtered_dict)
 
     #show_samples(train_test_valid_ds, filtered_dict.features)
@@ -227,16 +227,16 @@ import torch
 import numpy as np
 
 
-def batch_training(model, tokenized_datasets, data_collator):
-    batch_size = 8
+def batch_training(model, args, tokenized_datasets, data_collator):
+
     train_dataloader = DataLoader(
         tokenized_datasets["train"],
         shuffle=True,
         collate_fn=data_collator,
-        batch_size=batch_size,
+        batch_size=args.per_device_train_batch_size,
     )
     eval_dataloader = DataLoader(
-        tokenized_datasets["valid"], collate_fn=data_collator, batch_size=batch_size
+        tokenized_datasets["valid"], collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
 
     #accelearate 
@@ -250,9 +250,9 @@ def batch_training(model, tokenized_datasets, data_collator):
     )
 
     # set learning_rate
-    num_train_epochs = 10
+    #num_train_epochs = 10
     num_update_steps_per_epoch = len(train_dataloader)
-    num_training_steps = num_train_epochs * num_update_steps_per_epoch
+    num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
 
     rouge_score = evaluate.load("rouge")
     lr_scheduler = get_scheduler(
@@ -273,7 +273,7 @@ def batch_training(model, tokenized_datasets, data_collator):
 
     progress_bar = tqdm(range(num_training_steps))
 
-    for epoch in range(num_train_epochs):
+    for epoch in range(args.num_train_epochs):
         # Training
         model.train()
         for step, batch in enumerate(train_dataloader):
@@ -357,26 +357,29 @@ def print_summary(idx, summarizer, ds):
 from transformers import pipeline
 
 def summarize_text_with_model_pipeline(hub_model_id, request_text):
-    summarizer = pipeline("summarization", model=hub_model_id)
+    request_text = "Summarize: "+request_text
+
+    summarizer = pipeline("summarization", model=hub_model_id, max_new_tokens=250)
 
     summary_response = summarizer(request_text)
     summary = summary_response[0]["summary_text"]
 
-    print(f"\n'>>> Summary: {summary}'")
+    return summary
     #print_summary(100, summarizer, ds)
 
 
 def summarize_text_with_model(hub_model_id, request_text):
-    
+    request_text = request_text
+
     tokenizer = AutoTokenizer.from_pretrained(hub_model_id)
     inputs = tokenizer(request_text, return_tensors="pt").input_ids
     
     model = AutoModelForSeq2SeqLM.from_pretrained(hub_model_id)
-    outputs = model.generate(inputs,  do_sample=True)
+    outputs = model.generate(inputs, max_new_tokens=250)
     
     summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    print(f"\n'{summary}'")
+    return summary
     #print_summary(100, summarizer, ds)
 
 def run_training(train_test_valid_ds, tokenizer):
@@ -433,17 +436,28 @@ def run_training(train_test_valid_ds, tokenizer):
 
 
     #sequential_training(model, args, tokenized_datasets, data_collator)
-    batch_training(model, tokenized_datasets, data_collator)
+    batch_training(model, args, tokenized_datasets, data_collator)
 
-
+# DATASET
 train_test_valid_ds, tokenizer = init_dataset()
-print(train_test_valid_ds)
+
+# TRAIN MODEL
 #run_training(train_test_valid_ds, tokenizer)
 
 model = "aberry273/"+_summarize_model_name
 
 req_example_text = "Replacing live data with tokens in systems is intended to minimize exposure of sensitive data to those applications, stores, people and processes, reducing risk of compromise or accidental exposure and unauthorized access to sensitive data. Applications can operate using tokens instead of live data, with the exception of a small number of trusted applications explicitly permitted to detokenize when strictly necessary for an approved business purpose. Tokenization systems may be operated in-house within a secure isolated segment of the data center, or as a service from a secure service provider."
 
-summarize_text_with_model_pipeline(model, req_example_text)
+article = get_article('Garbage collection (computer science)')
 
-summarize_text_with_model(model, req_example_text)
+def summarize_article(article):
+    article_title = article['title']
+    article_summary = summarize_text_with_model_pipeline(model, article['text'])
+    print(f"\n'{article_title}: {article_summary}'")
+
+    for subtopic in article['subtopics']:
+        sub_title = subtopic['title']
+        sub_summary = summarize_text_with_model_pipeline(model, subtopic['text'])
+        print(f"\n' > {sub_title}: {sub_summary}'")
+
+summarize_article(article)
